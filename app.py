@@ -43,7 +43,7 @@ MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "1900"))  # Telegram bot upload 
 CHANNEL_LINK = f"https://t.me/{CHANNEL_USERNAME}"
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 
-bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
 
 db.init_db()
