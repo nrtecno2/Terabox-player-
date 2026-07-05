@@ -26,7 +26,12 @@ log = logging.getLogger("teraboxbot")
 BOT_TOKEN = os.environ["BOT_TOKEN"]                     # BotFather se mila token
 CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "nrtecno2")  # bina @ ke
 PRIVATE_CHANNEL_ID = int(os.environ["PRIVATE_CHANNEL_ID"])  # e.g. -1001234567890
-WEBHOOK_HOST = os.environ["WEBHOOK_HOST"]                 # e.g. https://your-app.onrender.com
+
+# WEBHOOK_HOST manually set karne ki zaroorat nahi hai.
+# Render har service ke liye khud RENDER_EXTERNAL_URL environment variable
+# set karta hai (e.g. https://your-app.onrender.com) - hum wahi use karenge.
+# Agar kisi wajah se wo na mile, to manually WEBHOOK_HOST set kar sakte hain (optional).
+WEBHOOK_HOST = os.environ.get("WEBHOOK_HOST") or os.environ.get("RENDER_EXTERNAL_URL")
 FREE_LIMIT = int(os.environ.get("FREE_LIMIT", "3"))
 REQUIRED_REFERRALS = int(os.environ.get("REQUIRED_REFERRALS", "2"))
 MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "1900"))  # Telegram bot upload limit ~2GB (self-hosted API) / 50MB (cloud API default)
@@ -38,6 +43,26 @@ bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
 app = Flask(__name__)
 
 db.init_db()
+
+
+def auto_set_webhook():
+    """App start hote hi khud webhook set kar deta hai - manual step ki zaroorat nahi."""
+    if not WEBHOOK_HOST:
+        log.warning(
+            "WEBHOOK_HOST na RENDER_EXTERNAL_URL mila na WEBHOOK_HOST env var - "
+            "webhook set nahi ho paayega. /set_webhook route se manually try kar sakte hain."
+        )
+        return
+    try:
+        bot.remove_webhook()
+        url = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+        ok = bot.set_webhook(url=url)
+        log.info(f"Webhook auto-set: {ok} -> {url}")
+    except Exception as e:
+        log.error(f"Webhook auto-set fail hua: {e}")
+
+
+auto_set_webhook()
 
 
 # ---------------------------- Helper functions ----------------------------
@@ -254,6 +279,8 @@ def index():
 
 @app.route("/set_webhook", methods=["GET"])
 def set_webhook():
+    if not WEBHOOK_HOST:
+        return {"error": "WEBHOOK_HOST/RENDER_EXTERNAL_URL nahi mila"}, 400
     bot.remove_webhook()
     ok = bot.set_webhook(url=f"{WEBHOOK_HOST}{WEBHOOK_PATH}")
     return {"webhook_set": ok, "url": f"{WEBHOOK_HOST}{WEBHOOK_PATH}"}, 200
