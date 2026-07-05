@@ -4,19 +4,27 @@ Terabox share links se file info + direct download link nikalne ke liye.
 Koi official/paid Terabox API use nahi hota - jo endpoint terabox ki website
 khud browser me use karti hai, wahi endpoint yahan call kiya jata hai.
 
-IMPORTANT (update): Terabox ne ab bina login/cookie ke public endpoint
-access restrict kar diya hai. Isliye ab is module ko kaam karne ke liye
-ek REAL Terabox account ka cookie chahiye (TERABOX_COOKIE environment
-variable me set karna hoga). Cookie nikalne ka tareeka README me hai.
+IMPORTANT: Terabox ne ab bina login/cookie ke public endpoint access
+restrict kar diya hai. Isliye is module ko kaam karne ke liye ek REAL
+Terabox account ka cookie chahiye (TERABOX_COOKIE environment variable
+me set karna hoga). Cookie nikalne ka tareeka README me hai.
+
+Extraction do steps me hota hai:
+1. share/list  -> file metadata (fs_id, shareid, uk, sign, timestamp)
+2. api/download -> actual dlink (direct download link)
 
 NOTE: Terabox apni website ka structure/endpoint kabhi kabhi change karta hai.
-Agar ye kaam karna band kar de, to is file ke jsToken-extraction regex ya
-endpoint path update karne se dobara chalu ho sakta hai.
+Agar ye kaam karna band kar de, to is file ke regex/endpoint update karne se
+dobara chalu ho sakta hai.
 """
 
 import os
 import re
+import json
+import logging
 import requests
+
+log = logging.getLogger("teraboxbot.terabox")
 
 TERABOX_COOKIE = os.environ.get("TERABOX_COOKIE", "").strip()
 
@@ -30,7 +38,6 @@ HEADERS = {
     "Referer": "https://www.terabox.com/",
 }
 
-# Terabox ke alag alag domain variants jo log share karte hain
 TERABOX_DOMAINS = [
     "terabox.com", "1024terabox.com", "teraboxapp.com", "freeterabox.com",
     "nephobox.com", "4funbox.com", "mirrobox.com", "momerybox.com",
@@ -51,7 +58,6 @@ def _headers_with_cookie():
 
 
 def _extract_surl(session: requests.Session, url: str):
-    """Link ko follow karke final URL se short-url (surl) nikalta hai."""
     resp = session.get(url, headers=_headers_with_cookie(), allow_redirects=True, timeout=20)
     final_url = resp.url
 
@@ -71,11 +77,6 @@ def _extract_surl(session: requests.Session, url: str):
 
 
 def _extract_js_token(html: str):
-    """
-    Share page ki HTML me jsToken embed hota hai (URL-encoded JS ke andar).
-    Alag alag patterns try karte hain kyunki Terabox format kabhi kabhi
-    thoda badalta rehta hai.
-    """
     patterns = [
         r"fn%28%22(.*?)%22%29",
         r'window\.jsToken\s*=\s*"(.*?)"',
@@ -90,7 +91,7 @@ def _extract_js_token(html: str):
 
 def get_terabox_files(share_url: str):
     """
-    Terabox share link se file list nikalta hai.
+    Terabox share link se file list + direct download link nikalta hai.
     Return: list of dicts -> [{name, size, dlink, thumb, fs_id}, ...]
     Error hone par: raises Exception with readable message.
     """
@@ -115,6 +116,7 @@ def get_terabox_files(share_url: str):
             "ya Terabox ne page ka structure change kar diya hai."
         )
 
+    # --- Step 1: file list + metadata ---
     share_api = f"https://{base_domain}/share/list"
     share_params = {
         "app_id": "250528",
@@ -143,23 +145,81 @@ def get_terabox_files(share_url: str):
     if not file_list:
         raise Exception("Is link me koi file nahi mili.")
 
+    shareid = data.get("shareid")
+    uk = data.get("uk")
+    sign = data.get("sign")
+    timestamp = data.get("timestamp")
+
+    non_dir_files = [f for f in file_list if str(f.get("isdir")) != "1"]
+    if not non_dir_files:
+        raise Exception("Is link me koi downloadable file nahi mili (sirf folder hai).")
+
     results = []
-    for f in file_list:
-        if str(f.get("isdir")) == "1":
-            continue
-        dlink = f.get("dlink")
-        if not dlink:
-            continue
-        results.append({
-            "name": f.get("server_filename", "file"),
-            "size": int(f.get("size", 0)),
-            "dlink": dlink,
-            "thumb": (f.get("thumbs") or {}).get("url3", ""),
-            "fs_id": f.get("fs_id"),
-        })
+
+    # Agar share/list ne khud hi dlink de diya, to seedha use karo
+    files_needing_dlink = []
+    for f in non_dir_files:
+        if f.get("dlink"):
+            results.append({
+                "name": f.get("server_filename", "file"),
+                "size": int(f.get("size", 0)),
+                "dlink": f["dlink"],
+                "thumb": (f.get("thumbs") or {}).get("url3", ""),
+                "fs_id": f.get("fs_id"),
+            })
+        else:
+            files_needing_dlink.append(f)
+
+    # --- Step 2: baaki files ke liye /api/download call karo ---
+    if files_needing_dlink and shareid and uk and sign and timestamp:
+        fid_list = json.dumps([int(f.get("fs_id")) for f in files_needing_dlink])
+        download_api = f"https://{base_domain}/api/download"
+        download_params = {
+            "app_id": "250528",
+            "web": "1",
+            "channel": "dubox",
+            "clienttype": "0",
+            "jsToken": js_token,
+            "shorturl": surl,
+            "type": "dlink",
+            "shareid": shareid,
+            "uk": uk,
+            "sign": sign,
+            "timestamp": timestamp,
+            "fid_list": fid_list,
+        }
+        dr = session.get(download_api, headers=_headers_with_cookie(), params=download_params, timeout=20)
+        try:
+            ddata = dr.json()
+        except ValueError:
+            ddata = {}
+
+        log.info(f"terabox /api/download response: {ddata}")
+
+        # Terabox alag alag response shapes de sakta hai - sabko handle karte hain
+        dlink_items = ddata.get("dlink") or ddata.get("list") or ddata.get("info") or []
+        dlink_map = {}
+        for item in dlink_items:
+            fid = item.get("fs_id") or item.get("fsid") or item.get("fid")
+            if item.get("dlink"):
+                dlink_map[fid] = item["dlink"]
+
+        for f in files_needing_dlink:
+            dlink = dlink_map.get(f.get("fs_id"))
+            if dlink:
+                results.append({
+                    "name": f.get("server_filename", "file"),
+                    "size": int(f.get("size", 0)),
+                    "dlink": dlink,
+                    "thumb": (f.get("thumbs") or {}).get("url3", ""),
+                    "fs_id": f.get("fs_id"),
+                })
 
     if not results:
-        raise Exception("Direct download link generate nahi ho paaya. Link expired ho sakta hai.")
+        raise Exception(
+            "Direct download link generate nahi ho paaya. Link expired ho sakta hai, "
+            "ya Terabox ne apna API structure badal diya hai."
+        )
 
     return results
 
