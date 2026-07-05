@@ -22,6 +22,10 @@ import terabox
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("teraboxbot")
 
+# telebot apni background threads me jo bhi error deta hai wo iske bina
+# console/Render logs me nazar nahi aata - isliye explicitly enable kar rahe hain.
+telebot.logger.setLevel(logging.DEBUG)
+
 # ---------------- Environment variables (Render me set karein) ----------------
 BOT_TOKEN = os.environ["BOT_TOKEN"]                     # BotFather se mila token
 CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "nrtecno2")  # bina @ ke
@@ -110,67 +114,78 @@ def send_ask_link(chat_id):
 
 @bot.message_handler(commands=["start"])
 def handle_start(message):
-    user_id = message.from_user.id
-    username = message.from_user.username or ""
+    try:
+        user_id = message.from_user.id
+        username = message.from_user.username or ""
 
-    referred_by = None
-    parts = message.text.split(maxsplit=1)
-    if len(parts) > 1 and parts[1].startswith("ref_"):
+        referred_by = None
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1 and parts[1].startswith("ref_"):
+            try:
+                ref_id = int(parts[1].replace("ref_", ""))
+                if ref_id != user_id:
+                    referred_by = ref_id
+            except ValueError:
+                pass
+
+        is_new = db.create_user_if_not_exists(user_id, username, referred_by)
+        log.info(f"/start from user_id={user_id} username={username} is_new={is_new}")
+
+        if not is_member(user_id):
+            send_join_prompt(message.chat.id)
+            return
+
+        db.set_joined(user_id)
+
+        bot.send_message(
+            message.chat.id,
+            "🎉 Welcome! Aap already channel member hain.\n\n"
+            "Ab mujhe apna Terabox link bhejein.",
+        )
+    except Exception:
+        log.exception(f"handle_start me error aayi, message: {message}")
         try:
-            ref_id = int(parts[1].replace("ref_", ""))
-            if ref_id != user_id:
-                referred_by = ref_id
-        except ValueError:
+            bot.send_message(message.chat.id, "⚠️ Kuch error aayi, thodi der baad dobara try karein.")
+        except Exception:
             pass
-
-    is_new = db.create_user_if_not_exists(user_id, username, referred_by)
-
-    if not is_member(user_id):
-        send_join_prompt(message.chat.id)
-        return
-
-    db.set_joined(user_id)
-    user = db.get_user(user_id)
-
-    # agar pehli baar verify ho raha hai aur referral se aaya hai, referrer ko credit do
-    if is_new and referred_by:
-        pass  # credit sirf verify ke baad diya jaata hai, neeche callback me
-
-    bot.send_message(
-        message.chat.id,
-        "🎉 Welcome! Aap already channel member hain.\n\n"
-        "Ab mujhe apna Terabox link bhejein.",
-    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "verify")
 def handle_verify(call):
-    user_id = call.from_user.id
-    if is_member(user_id):
-        user = db.get_user(user_id)
-        was_joined = user["joined_channel"] if user else 0
+    try:
+        user_id = call.from_user.id
+        log.info(f"verify clicked by user_id={user_id}")
+        if is_member(user_id):
+            user = db.get_user(user_id)
+            was_joined = user["joined_channel"] if user else 0
 
-        db.set_joined(user_id)
+            db.set_joined(user_id)
 
-        # Referral credit sirf ek baar, jab user pehli baar verify hota hai
-        if user and not was_joined and user.get("referred_by"):
-            db.increment_referral(user["referred_by"])
-            try:
-                bot.send_message(
-                    user["referred_by"],
-                    "🎉 Aapke referral link se ek naya user verify hua hai!",
-                )
-            except Exception:
-                pass
+            # Referral credit sirf ek baar, jab user pehli baar verify hota hai
+            if user and not was_joined and user.get("referred_by"):
+                db.increment_referral(user["referred_by"])
+                try:
+                    bot.send_message(
+                        user["referred_by"],
+                        "🎉 Aapke referral link se ek naya user verify hua hai!",
+                    )
+                except Exception:
+                    pass
 
-        bot.answer_callback_query(call.id, "✅ Verified!")
-        bot.edit_message_text(
-            "✅ Verification successful! Ab mujhe apna Terabox link bhejein.",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-        )
-    else:
-        bot.answer_callback_query(call.id, "❌ Aapne abhi channel join nahi kiya hai.", show_alert=True)
+            bot.answer_callback_query(call.id, "✅ Verified!")
+            bot.edit_message_text(
+                "✅ Verification successful! Ab mujhe apna Terabox link bhejein.",
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+            )
+        else:
+            bot.answer_callback_query(call.id, "❌ Aapne abhi channel join nahi kiya hai.", show_alert=True)
+    except Exception:
+        log.exception(f"handle_verify me error aayi, call: {call}")
+        try:
+            bot.answer_callback_query(call.id, "⚠️ Kuch error aayi, dobara try karein.", show_alert=True)
+        except Exception:
+            pass
 
 
 @bot.message_handler(func=lambda m: m.text and terabox.is_terabox_link(m.text))
